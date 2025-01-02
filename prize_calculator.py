@@ -3062,29 +3062,34 @@ class PrizeDistributionApp:
                 if not prize:
                     return
 
+                # Log per debug
+                self.translation_manager.log(
+                    "debug",
+                    "log_distribution_calculation",
+                    prize_name=prize.name,
+                    quantity=prize.quantity,
+                    integer_only=self.integer_only.get()
+                )
+
                 # Calcola distribuzione
                 distribution_data = self.calculate_distribution(prize)
 
                 # Visualizza distribuzione
-                # Aggiorniamo questa parte per usare il nuovo formato
-                for name, quantity in distribution_data:
-                    # Troviamo il partecipante per ottenere il suo ID
-                    participant = next((p for p in self.participants if p.name == name), None)
-                    if participant:
-                        check_key = (selected_prize, name)
-                        is_checked = check_key in self.distribution_checks
+                for participant_id, name, quantity in distribution_data:
+                    check_key = (selected_prize, name)
+                    is_checked = check_key in self.distribution_checks
 
-                        self.distribution_table.insert(
-                            "",
-                            "end",
-                            values=(
-                                participant.id,  # Usiamo l'ID dal partecipante
-                                name,
-                                self.format_number(quantity, self.integer_only.get()),
-                                "☑" if is_checked else "☐"
-                            ),
-                            tags=("center", "checked") if is_checked else ("center",)
-                        )
+                    self.distribution_table.insert(
+                        "",
+                        "end",
+                        values=(
+                            participant_id,
+                            name,
+                            self.format_number(quantity, self.integer_only.get()),
+                            "☑" if is_checked else "☐"
+                        ),
+                        tags=("center", "checked") if is_checked else ("center",)
+                    )
 
             except ValueError:
                 return
@@ -3100,7 +3105,6 @@ class PrizeDistributionApp:
                 "log_error_distribution_update",
                 error=str(e)
             )
-            raise
 
     def add_prizes(self):
         """Aggiunta di nuovi premi"""
@@ -3580,22 +3584,29 @@ class PrizeDistributionApp:
                 # Distribuzione premio speciale
                 top_participants = sorted(
                     active_participants,
-                    key=lambda p: p.damage,
-                    reverse=True
+                    key=lambda p: p.id  # Ordina per ID
                 )[:prize.top_winners]
                 winner_total_damage = sum(p.damage for p in top_participants)
 
-                for p in top_participants:
-                    ratio = p.damage / winner_total_damage
-                    qty = prize.quantity * ratio if not self.integer_only.get() else max(1, round(prize.quantity * ratio))
-                    distribution_data.append((p.name, qty))  # Modifica qui: rimuovi l'ID
-                    
+                if self.integer_only.get():
+                    distribution_data = self.calculate_integer_distribution(top_participants, winner_total_damage, prize.quantity)
+                else:
+                    for p in top_participants:
+                        ratio = p.damage / winner_total_damage
+                        qty = prize.quantity * ratio
+                        distribution_data.append((p.id, p.name, qty))
+                        
             else:
                 # Distribuzione premio normale
-                for p in active_participants:
-                    ratio = p.damage / total_damage
-                    qty = prize.quantity * ratio if not self.integer_only.get() else max(1, round(prize.quantity * ratio))
-                    distribution_data.append((p.name, qty))  # Modifica qui: rimuovi l'ID
+                if self.integer_only.get():
+                    distribution_data = self.calculate_integer_distribution(active_participants, total_damage, prize.quantity)
+                else:
+                    # Ordina i partecipanti per ID prima di calcolare le quote
+                    sorted_participants = sorted(active_participants, key=lambda p: p.id)
+                    for p in sorted_participants:
+                        ratio = p.damage / total_damage
+                        qty = prize.quantity * ratio
+                        distribution_data.append((p.id, p.name, qty))
 
             return distribution_data
 
@@ -4295,54 +4306,66 @@ class PrizeDistributionApp:
             total_damage: float,
             quantity: float
         ) -> List[Tuple[int, str, float]]:
-        """Calcolo distribuzione con numeri interi"""
-        try:
-            if not participants or total_damage == 0:
+            """Calcolo distribuzione con numeri interi"""
+            try:
+                if not participants or total_damage == 0:
+                    return []
+
+                total_to_distribute = int(quantity)
+                
+                # Calcolo quote esatte e ordina per danno
+                shares = []
+                for participant in sorted(participants, key=lambda p: p.damage, reverse=True):
+                    ratio = participant.damage / total_damage
+                    exact_share = quantity * ratio
+                    shares.append([participant, exact_share, exact_share])  # salviamo anche la quota esatta originale
+
+                # Prima assegnazione basata sull'arrotondamento matematico standard
+                total_assigned = 0
+                for share in shares:
+                    rounded = round(share[1])  # .5 o più va all'intero superiore
+                    share[1] = rounded
+                    total_assigned += rounded
+
+                # Correggi il totale se necessario
+                diff = total_assigned - total_to_distribute
+                if diff != 0:
+                    # Manteniamo l'ordine per danno per le correzioni
+                    if diff > 0:  # Se abbiamo assegnato troppo
+                        for i in range(abs(diff)):
+                            # Cerchiamo la quota più bassa che possiamo decrementare
+                            min_loss = float('inf')
+                            min_idx = -1
+                            for j, share in enumerate(shares):
+                                if share[1] > 0:  # se possiamo ancora decrementare
+                                    loss = abs((share[1] - 1) - share[2])  # distanza dalla quota esatta
+                                    if loss < min_loss:
+                                        min_loss = loss
+                                        min_idx = j
+                            if min_idx >= 0:
+                                shares[min_idx][1] -= 1
+                    else:  # Se abbiamo assegnato troppo poco
+                        for i in range(abs(diff)):
+                            # Cerchiamo la quota più alta che possiamo incrementare
+                            min_gain = float('inf')
+                            min_idx = -1
+                            for j, share in enumerate(shares):
+                                gain = abs((share[1] + 1) - share[2])  # distanza dalla quota esatta
+                                if gain < min_gain:
+                                    min_gain = gain
+                                    min_idx = j
+                            if min_idx >= 0:
+                                shares[min_idx][1] += 1
+
+                # Ordina il risultato finale per ID
+                result = [(p.id, p.name, qty) for p, qty, _ in shares]
+                result.sort(key=lambda x: x[0])
+
+                return result
+
+            except Exception as e:
+                self.translation_manager.log("error", "log_error_integer_distribution", error=str(e))
                 return []
-
-            # Conversione a intero della quantità totale
-            remaining = int(round(quantity))
-            shares = []
-
-            # Calcolo quote iniziali basate sul danno
-            for participant in participants:
-                ratio = participant.damage / total_damage
-                share = max(1, round(quantity * ratio))
-                shares.append([participant, share])
-
-            # Aggiustamento per far corrispondere al totale
-            total_shares = sum(share[1] for share in shares)
-            if total_shares != remaining:
-                # Ordina per danno per distribuzione consistente
-                shares.sort(key=lambda x: x[0].damage, reverse=True)
-
-                if total_shares < remaining:
-                    # Aggiungi rimanenti ai danni maggiori
-                    diff = remaining - total_shares
-                    for i in range(min(diff, len(shares))):
-                        shares[i][1] += 1
-                else:
-                    # Rimuovi dai danni minori
-                    diff = total_shares - remaining
-                    for i in range(len(shares)-1, -1, -1):
-                        if shares[i][1] > 1 and diff > 0:
-                            adjust = min(shares[i][1] - 1, diff)
-                            shares[i][1] -= adjust
-                            diff -= adjust
-
-            self.translation_manager.log(
-                "debug",
-                "log_integer_distribution_calculated",
-                participants=len(participants),
-                quantity=quantity
-            )
-
-            # Restituisci ID, nome e quantità per ogni partecipante
-            return [(p.id, p.name, qty) for p, qty in shares]
-
-        except Exception as e:
-            self.translation_manager.log("error", "log_error_integer_distribution", error=str(e))
-            raise
 
     def format_number(self, value: float, force_integer: bool = False) -> str:
         """Formattazione numero rimuovendo decimali non necessari"""
