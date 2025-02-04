@@ -6109,7 +6109,7 @@ class PrizeDistributionApp:
                 all_distributions = {}
                 for prize in self.prizes:
                     distributions = self.calculate_distribution(prize)
-                    all_distributions[prize.id] = [(name, qty) for name, qty in distributions]
+                    all_distributions[prize.id] = [(name, qty) for _, name, qty in distributions]
 
                 # Crea nuovo stato
                 state = SavedState(
